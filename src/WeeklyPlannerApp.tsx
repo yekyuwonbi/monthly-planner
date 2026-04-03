@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, Plus, Settings2, Trash2, Upload, X, Star } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { User } from "@supabase/supabase-js";
@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { SettingsRangeField } from "@/components/planner/SettingsRangeField";
 import { removePlannerBackground, uploadPlannerBackground } from "@/lib/cloudMedia";
 import { fetchRemotePlannerState, saveRemotePlannerState } from "@/lib/cloudPlanner";
-import { DEFAULT_DECOR_MEDIA, DEFAULT_DECOR_THEME, type DecorMediaState, type DecorState, type DecorThemeState, type MediaFitMode, PASTEL_THEME_PRESETS, splitDecorState, type ThemePresetId } from "@/lib/decorConfig";
+import { DEFAULT_DECOR_MEDIA, DEFAULT_DECOR_THEME, type DecorMediaState, type DecorState, type DecorThemeState, type MediaFitMode, splitDecorState } from "@/lib/decorConfig";
 import { DAILY_MESSAGES } from "@/lib/dailyMessages";
 import { buildPanelTheme } from "@/lib/plannerTheme";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
@@ -635,6 +635,11 @@ export default function WeeklyPlannerApp() {
   const pendingSaveMessageRef = useRef<string | null>(null);
   const lastVibrationAtRef = useRef(0);
   const lastSavePulseAtRef = useRef(0);
+  const latestPlannerStateRef = useRef<SavedState | null>(null);
+  const plannerStateVersionRef = useRef(0);
+  const plannerChangeSourceRef = useRef<"hydrate" | "user">("hydrate");
+  const hasPlannerSnapshotRef = useRef(false);
+  const sessionUserId = sessionUser?.id ?? null;
 
   const triggerSavePulse = useCallback((message = "자동 저장됨", options?: { force?: boolean }) => {
     const now = Date.now();
@@ -667,9 +672,11 @@ export default function WeeklyPlannerApp() {
       meta: { updatedAt },
     };
   }, [decorMedia, decorTheme, interaction, interval, planSync, plans, profile, school, sleep, todos]);
+  const getCurrentSavedState = useEffectEvent(() => buildSavedState());
 
   const applySavedState = useCallback((saved: SavedState | null) => {
     if (!saved) return;
+    plannerChangeSourceRef.current = "hydrate";
     setPlans(saved.plans || {});
     setTodos(saved.todos || {});
     setSleep(saved.sleep || DEFAULT_SLEEP);
@@ -685,6 +692,19 @@ export default function WeeklyPlannerApp() {
     setProfile(saved.profile || DEFAULT_PROFILE);
     setInteraction({ ...DEFAULT_INTERACTION, ...(saved.interaction || {}) });
   }, []);
+
+  useEffect(() => {
+    latestPlannerStateRef.current = buildSavedState();
+    if (!hasPlannerSnapshotRef.current) {
+      hasPlannerSnapshotRef.current = true;
+      plannerChangeSourceRef.current = "user";
+      return;
+    }
+    if (plannerChangeSourceRef.current !== "hydrate") {
+      plannerStateVersionRef.current += 1;
+    }
+    plannerChangeSourceRef.current = "user";
+  }, [buildSavedState]);
 
   useEffect(() => {
     const saved = loadSavedPlanner();
@@ -748,7 +768,7 @@ export default function WeeklyPlannerApp() {
 
   useEffect(() => {
     if (!supabase) return undefined;
-    if (!sessionUser) {
+    if (!sessionUserId) {
       setCloudReady(true);
       setCloudSyncing(false);
       setAuthMessage("");
@@ -757,7 +777,8 @@ export default function WeeklyPlannerApp() {
 
     let cancelled = false;
     const client = supabase;
-    const user = sessionUser;
+    const userId = sessionUserId;
+    const syncStartedAtVersion = plannerStateVersionRef.current;
 
     async function syncPlannerFromCloud() {
       setCloudSyncing(true);
@@ -765,21 +786,24 @@ export default function WeeklyPlannerApp() {
       setAuthError("");
       try {
         const localSaved = loadSavedPlanner();
-        const remote = await fetchRemotePlannerState(client, user.id);
+        const remote = await fetchRemotePlannerState(client, userId);
         if (cancelled) return;
 
         const remoteSaved = (remote?.planner_state || null) as SavedState | null;
         const remoteUpdatedAt = getSavedStateUpdatedAt(remoteSaved) || (remote?.updated_at ? new Date(remote.updated_at).getTime() : 0);
-        const localUpdatedAt = getSavedStateUpdatedAt(localSaved);
+        const hasLocalChangesDuringSync = plannerStateVersionRef.current !== syncStartedAtVersion;
+        const currentSaved = latestPlannerStateRef.current || getCurrentSavedState();
+        const localCandidate = hasLocalChangesDuringSync ? currentSaved : (localSaved || currentSaved);
+        const localUpdatedAt = getSavedStateUpdatedAt(localCandidate);
 
         if (remoteSaved && remoteUpdatedAt > localUpdatedAt) {
           applySavedState(remoteSaved);
           window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteSaved));
           setAuthMessage("계정에 저장된 최신 데이터를 불러왔어.");
         } else {
-          const snapshotToUpload = localSaved || buildSavedState();
+          const snapshotToUpload = localCandidate;
           const uploadUpdatedAt = getSavedStateUpdatedAt(snapshotToUpload) || Date.now();
-          await saveRemotePlannerState(client, user.id, snapshotToUpload, uploadUpdatedAt);
+          await saveRemotePlannerState(client, userId, snapshotToUpload, uploadUpdatedAt);
           if (cancelled) return;
           setAuthMessage(localSaved ? "이 기기 데이터를 계정에 동기화했어." : "새 계정 저장 공간을 준비해뒀어.");
         }
@@ -799,18 +823,18 @@ export default function WeeklyPlannerApp() {
     return () => {
       cancelled = true;
     };
-  }, [applySavedState, buildSavedState, sessionUser]);
+  }, [applySavedState, sessionUserId]);
 
   useEffect(() => {
-    if (!supabase || !sessionUser || !cloudReady) return undefined;
+    if (!supabase || !sessionUserId || !cloudReady) return undefined;
     if (cloudSaveTimeoutRef.current) clearTimeout(cloudSaveTimeoutRef.current);
     const client = supabase;
-    const user = sessionUser;
+    const userId = sessionUserId;
 
     cloudSaveTimeoutRef.current = setTimeout(() => {
       const snapshot = buildSavedState();
       const updatedAt = getSavedStateUpdatedAt(snapshot) || Date.now();
-      saveRemotePlannerState(client, user.id, snapshot, updatedAt)
+      saveRemotePlannerState(client, userId, snapshot, updatedAt)
         .then(() => setAuthMessage("계정에도 자동 저장됐어."))
         .catch((error) => setAuthError(error instanceof Error ? error.message : "계정 저장에 실패했어."));
     }, 900);
@@ -818,7 +842,7 @@ export default function WeeklyPlannerApp() {
     return () => {
       if (cloudSaveTimeoutRef.current) clearTimeout(cloudSaveTimeoutRef.current);
     };
-  }, [buildSavedState, cloudReady, sessionUser]);
+  }, [buildSavedState, cloudReady, sessionUserId]);
 
   useEffect(() => {
     if (!supabase || !sessionUser || !cloudReady || decorTheme.themePreset !== "custom") return undefined;
@@ -1103,25 +1127,6 @@ export default function WeeklyPlannerApp() {
     setDecorMedia((prev) => ({ ...prev, mediaUrl: "", cloudMediaPath: "", uploadedMediaUrl: "", uploadedMediaType: "" }));
   };
 
-  const applyPastelTheme = (themeId: Exclude<ThemePresetId, "custom">) => {
-    const theme = PASTEL_THEME_PRESETS.find((item) => item.id === themeId);
-    if (!theme) return;
-    pendingSaveMessageRef.current = `${theme.label} 테마가 저장됐어`;
-    setDecorTheme((prev) => ({
-      ...prev,
-      ...theme.decor,
-    }));
-  };
-
-  const enableCustomTheme = () => {
-    pendingSaveMessageRef.current = "커스텀 배경 모드로 돌아왔어";
-    setDecorTheme((prev) => ({
-      ...prev,
-      themePreset: "custom",
-      panelColor: "#ffffff",
-    }));
-  };
-
   const resetDecorSettings = () => {
     pendingSaveMessageRef.current = "기본 설정으로 돌아갔어";
     clearUploadedMediaFromDb().catch(() => undefined);
@@ -1150,12 +1155,11 @@ export default function WeeklyPlannerApp() {
   const currentScheduleText = scheduleEnabled ? (scheduleBlocks.length > 0 ? `${scheduleBlocks[0].start} ~ ${scheduleBlocks[0].end}` : "설정 없음") : "꺼짐";
   const sanityPassed = useMemo(() => runPlannerSanityChecks(), []);
   const decor = useMemo(() => ({ ...decorTheme, ...decorMedia }), [decorMedia, decorTheme]);
-  const mediaEnabled = decorTheme.themePreset === "custom";
-  const activeMediaUrl = mediaEnabled ? (decorMedia.uploadedMediaUrl || decorMedia.mediaUrl) : "";
+  const activeMediaUrl = decorMedia.uploadedMediaUrl || decorMedia.mediaUrl;
   const mediaType = useMemo(() => {
-    if (mediaEnabled && decorMedia.uploadedMediaUrl && decorMedia.uploadedMediaType) return decorMedia.uploadedMediaType;
+    if (decorMedia.uploadedMediaUrl && decorMedia.uploadedMediaType) return decorMedia.uploadedMediaType;
     return getMediaType(activeMediaUrl);
-  }, [activeMediaUrl, decorMedia.uploadedMediaType, decorMedia.uploadedMediaUrl, mediaEnabled]);
+  }, [activeMediaUrl, decorMedia.uploadedMediaType, decorMedia.uploadedMediaUrl]);
   const resolvedMediaFit = useMemo<Exclude<MediaFitMode, "auto">>(() => {
     if (decorMedia.mediaFit !== "auto") return decorMedia.mediaFit;
     return getAutoMediaFit(viewportAspect, mediaAspect);
@@ -1398,15 +1402,6 @@ export default function WeeklyPlannerApp() {
   useEffect(() => {
     let cancelled = false;
 
-    if (!mediaEnabled) {
-      applyUploadedMediaPreview(null, "");
-      return () => {
-        cancelled = true;
-        if (savePulseTimeoutRef.current) clearTimeout(savePulseTimeoutRef.current);
-        if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current);
-      };
-    }
-
     if (decorMedia.uploadedMediaUrl || decorMedia.mediaUrl || decorMedia.cloudMediaPath) {
       return () => {
         cancelled = true;
@@ -1433,13 +1428,12 @@ export default function WeeklyPlannerApp() {
       if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current);
       if (cloudSaveTimeoutRef.current) clearTimeout(cloudSaveTimeoutRef.current);
     };
-  }, [decorMedia.cloudMediaPath, decorMedia.mediaUrl, decorMedia.uploadedMediaUrl, mediaEnabled]);
+  }, [decorMedia.cloudMediaPath, decorMedia.mediaUrl, decorMedia.uploadedMediaUrl]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function syncAutoCalendarColor() {
-      if (decorTheme.themePreset !== "custom") return;
       let sampled = null as { r: number; g: number; b: number } | null;
       if (activeMediaUrl) {
         sampled = mediaType === "image" ? await sampleAverageColorFromImage(activeMediaUrl) : await sampleAverageColorFromVideo(activeMediaUrl);
@@ -1458,7 +1452,7 @@ export default function WeeklyPlannerApp() {
     return () => {
       cancelled = true;
     };
-  }, [activeMediaUrl, decorTheme.backgroundColor, decorTheme.themePreset, mediaType]);
+  }, [activeMediaUrl, decorTheme.backgroundColor, mediaType]);
 
   useEffect(() => {
     if (showSchedule) return;
@@ -2168,52 +2162,6 @@ export default function WeeklyPlannerApp() {
                 </div>
 
                 <div className="space-y-3 rounded-xl border p-3" style={{ background: mutedPanelBg, borderColor: "rgba(148, 163, 184, 0.24)" }}>
-                  <div>
-                    <div className="text-sm font-semibold">파스텔 테마</div>
-                    <div className="text-xs text-slate-500">테마를 고르면 글자, 배경, 캘린더 패널 색을 한 번에 맞춰주고 업로드 배경은 화면에 적용하지 않아.</div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => press(enableCustomTheme)}
-                      className={`flex min-h-[70px] w-full flex-col items-start justify-between rounded-xl border px-3 py-3 text-left transition-all ${decorTheme.themePreset === "custom" ? "ring-2 ring-slate-900 shadow-md" : "hover:border-slate-400"}`}
-                      style={{
-                        background: "linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,41,59,0.92))",
-                        borderColor: decorTheme.themePreset === "custom" ? "#0f172a" : "rgba(148, 163, 184, 0.4)",
-                        color: "#f8fafc",
-                      }}
-                    >
-                      <span className="text-sm font-semibold">커스텀</span>
-                      <span className="text-[11px] opacity-80">{decorTheme.themePreset === "custom" ? "현재 적용됨" : "업로드 배경 사용"}</span>
-                    </button>
-                    {PASTEL_THEME_PRESETS.map((theme) => (
-                      <button
-                        type="button"
-                        key={theme.id}
-                        onClick={() => press(() => applyPastelTheme(theme.id))}
-                        className={`flex min-h-[70px] w-full flex-col items-start justify-between rounded-xl border px-3 py-3 text-left transition-all ${decorTheme.themePreset === theme.id ? "ring-2 ring-slate-900 shadow-md" : "hover:border-slate-400"}`}
-                        style={{
-                          background: `linear-gradient(135deg, ${theme.swatches[0]}, ${theme.swatches[1]} 58%, ${theme.swatches[2]})`,
-                          borderColor: decorTheme.themePreset === theme.id ? "#0f172a" : "rgba(148, 163, 184, 0.34)",
-                          color: theme.decor.textColor,
-                        }}
-                      >
-                        <span className="text-sm font-semibold">{theme.label}</span>
-                        <span className="flex items-center gap-1">
-                          {theme.swatches.map((color) => (
-                            <span key={color} className="h-3 w-3 rounded-full border border-black/10 shadow-sm" style={{ backgroundColor: color }} />
-                          ))}
-                        </span>
-                        <span className="text-[11px] font-medium opacity-80">{decorTheme.themePreset === theme.id ? "현재 적용됨" : "눌러서 적용"}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    {decorTheme.themePreset === "custom" ? "커스텀 모드에서는 업로드 배경과 URL 배경을 그대로 쓸 수 있어." : "현재는 파스텔 테마 모드라서 업로드 배경 대신 테마 색이 우선 적용돼."}
-                  </div>
-                </div>
-
-                <div className="space-y-3 rounded-xl border p-3" style={{ background: mutedPanelBg, borderColor: "rgba(148, 163, 184, 0.24)" }}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold">버튼 반응</div>
@@ -2252,25 +2200,23 @@ export default function WeeklyPlannerApp() {
                 <div className="space-y-2">
                   <label className="text-sm font-semibold">배경 업로드</label>
                   <motion.label
-                    htmlFor={mediaEnabled ? "planner-media-upload" : undefined}
+                    htmlFor="planner-media-upload"
                     whileTap={{ scale: 0.98 }}
-                    className={`inline-flex w-full items-center justify-start gap-2 rounded-md border px-3 py-2 text-sm font-medium text-slate-900 transition-transform duration-150 ease-out ${mediaEnabled ? "cursor-pointer hover:scale-[0.985]" : "cursor-not-allowed opacity-50"}`}
+                    className="inline-flex w-full cursor-pointer items-center justify-start gap-2 rounded-md border px-3 py-2 text-sm font-medium text-slate-900 transition-transform duration-150 ease-out hover:scale-[0.985]"
                     style={{ background: strongPanelBg, borderColor: "rgba(148, 163, 184, 0.32)" }}
                   >
                     <Upload className="h-4 w-4" /> 사진 / GIF / 영상 업로드
                   </motion.label>
                   <div className="text-xs text-slate-500">{backgroundRatioHint}</div>
                   <div className="text-xs text-slate-500">
-                    {mediaEnabled
-                      ? (sessionUser ? "배경 URL과 업로드한 이미지·영상은 계정에도 저장돼서 다른 기기에서도 이어서 보여." : "배경 URL과 업로드한 이미지·영상은 이 기기에 자동 저장돼. 로그인하면 다른 기기 동기화도 할 수 있어.")
-                      : "파스텔 테마가 켜져 있는 동안에는 업로드 배경이 화면에 적용되지 않아."}
+                    {sessionUser ? "배경 URL과 업로드한 이미지·영상은 계정에도 저장돼서 다른 기기에서도 이어서 보여." : "배경 URL과 업로드한 이미지·영상은 이 기기에 자동 저장돼. 로그인하면 다른 기기 동기화도 할 수 있어."}
                   </div>
-                  {mediaEnabled && (decorMedia.uploadedMediaUrl || decorMedia.mediaUrl) && <div className="text-xs text-slate-500">배경이 적용되어 있어</div>}
+                  {(decorMedia.uploadedMediaUrl || decorMedia.mediaUrl) && <div className="text-xs text-slate-500">배경이 적용되어 있어</div>}
                 </div>
 
                 <div className="space-y-2">
                   <label className="text-sm font-semibold">배경 URL</label>
-                  <Input disabled={!mediaEnabled} value={decorMedia.mediaUrl} onChange={(e) => setDecorMedia((prev) => ({ ...prev, mediaUrl: e.target.value }))} placeholder={mediaEnabled ? "https://example.com/background.gif" : "커스텀 모드에서 사용할 수 있어"} />
+                  <Input value={decorMedia.mediaUrl} onChange={(e) => setDecorMedia((prev) => ({ ...prev, mediaUrl: e.target.value }))} placeholder="https://example.com/background.gif" />
                 </div>
 
                 <div className="space-y-2">
@@ -2292,7 +2238,6 @@ export default function WeeklyPlannerApp() {
                     <Button
                       variant={decorMedia.mediaFit === "auto" ? "default" : "outline"}
                       className="w-full"
-                      disabled={!mediaEnabled}
                       onClick={() => press(() => setDecorMedia((prev) => ({ ...prev, mediaFit: "auto" })))}
                     >
                       자동
@@ -2300,7 +2245,6 @@ export default function WeeklyPlannerApp() {
                     <Button
                       variant={decorMedia.mediaFit === "cover" ? "default" : "outline"}
                       className="w-full"
-                      disabled={!mediaEnabled}
                       onClick={() => press(() => setDecorMedia((prev) => ({ ...prev, mediaFit: "cover" })))}
                     >
                       꽉 채움
@@ -2308,19 +2252,18 @@ export default function WeeklyPlannerApp() {
                     <Button
                       variant={decorMedia.mediaFit === "contain" ? "default" : "outline"}
                       className="w-full"
-                      disabled={!mediaEnabled}
                       onClick={() => press(() => setDecorMedia((prev) => ({ ...prev, mediaFit: "contain" })))}
                     >
                       전체 보기
                     </Button>
                   </div>
                   <div className="text-xs text-slate-500">
-                    {mediaEnabled ? (decorMedia.mediaFit === "auto" ? `자동 적용: ${resolvedMediaFit === "cover" ? "꽉 채움" : "전체 보기"}` : `수동 적용: ${decorMedia.mediaFit === "cover" ? "꽉 채움" : "전체 보기"}`) : "파스텔 테마 중에는 미디어 비율 조절이 잠시 쉬어가."}
+                    {decorMedia.mediaFit === "auto" ? `자동 적용: ${resolvedMediaFit === "cover" ? "꽉 채움" : "전체 보기"}` : `수동 적용: ${decorMedia.mediaFit === "cover" ? "꽉 채움" : "전체 보기"}`}
                   </div>
                 </div>
 
                 <div className="text-xs text-slate-500">
-                  {decorTheme.themePreset === "custom" ? "커스텀 모드에서는 배경을 분석해서 글자색을 자동으로 맞춰." : "파스텔 테마에서는 테마에 맞는 글자색을 그대로 사용해."}
+                  배경을 분석해서 글자색을 자동으로 맞춰.
                 </div>
 
                 <SettingsRangeField
