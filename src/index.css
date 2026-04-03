@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  overflow-x: hidden;
+}
+
+html {
+  height: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  overscroll-behavior-y: none;
+  overflow-x: hidden;
+}
+
+.planner-range {
+  appearance: none;
+  height: 1.25rem;
+  background: transparent;
+  touch-action: pan-x;
+}
+
+.planner-range::-webkit-slider-runnable-track {
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    rgb(15 23 42) 0%,
+    rgb(15 23 42) var(--range-progress, 50%),
+    rgba(148, 163, 184, 0.35) var(--range-progress, 50%),
+    rgba(148, 163, 184, 0.35) 100%
+  );
+}
+
+.planner-range::-webkit-slider-thumb {
+  appearance: none;
+  margin-top: -0.25rem;
+  height: 1rem;
+  width: 1rem;
+  border-radius: 9999px;
+  border: 2px solid white;
+  background: rgb(15 23 42);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.22);
+}
+
+.planner-range::-moz-range-track {
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.35);
+}
+
+.planner-range::-moz-range-progress {
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: rgb(15 23 42);
+}
+
+.planner-range::-moz-range-thumb {
+  height: 1rem;
+  width: 1rem;
+  border-radius: 9999px;
+  border: 2px solid white;
+  background: rgb(15 23 42);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.22);
+}
