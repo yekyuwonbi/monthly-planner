@@ -2173,27 +2173,43 @@ export default function WeeklyPlannerApp() {
                     <div className="text-xs text-slate-500">테마를 고르면 글자, 배경, 캘린더 패널 색을 한 번에 맞춰주고 업로드 배경은 화면에 적용하지 않아.</div>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    <Button variant={decor.themePreset === "custom" ? "default" : "outline"} className="w-full" onClick={() => press(enableCustomTheme)}>
-                      커스텀
-                    </Button>
+                    <button
+                      type="button"
+                      onClick={() => press(enableCustomTheme)}
+                      className={`flex min-h-[70px] w-full flex-col items-start justify-between rounded-xl border px-3 py-3 text-left transition-all ${decorTheme.themePreset === "custom" ? "ring-2 ring-slate-900 shadow-md" : "hover:border-slate-400"}`}
+                      style={{
+                        background: "linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,41,59,0.92))",
+                        borderColor: decorTheme.themePreset === "custom" ? "#0f172a" : "rgba(148, 163, 184, 0.4)",
+                        color: "#f8fafc",
+                      }}
+                    >
+                      <span className="text-sm font-semibold">커스텀</span>
+                      <span className="text-[11px] opacity-80">{decorTheme.themePreset === "custom" ? "현재 적용됨" : "업로드 배경 사용"}</span>
+                    </button>
                     {PASTEL_THEME_PRESETS.map((theme) => (
-                      <Button
+                      <button
+                        type="button"
                         key={theme.id}
-                        variant={decor.themePreset === theme.id ? "default" : "outline"}
-                        className="flex w-full items-center justify-between gap-3"
                         onClick={() => press(() => applyPastelTheme(theme.id))}
+                        className={`flex min-h-[70px] w-full flex-col items-start justify-between rounded-xl border px-3 py-3 text-left transition-all ${decorTheme.themePreset === theme.id ? "ring-2 ring-slate-900 shadow-md" : "hover:border-slate-400"}`}
+                        style={{
+                          background: `linear-gradient(135deg, ${theme.swatches[0]}, ${theme.swatches[1]} 58%, ${theme.swatches[2]})`,
+                          borderColor: decorTheme.themePreset === theme.id ? "#0f172a" : "rgba(148, 163, 184, 0.34)",
+                          color: theme.decor.textColor,
+                        }}
                       >
-                        <span>{theme.label}</span>
+                        <span className="text-sm font-semibold">{theme.label}</span>
                         <span className="flex items-center gap-1">
                           {theme.swatches.map((color) => (
-                            <span key={color} className="h-3 w-3 rounded-full border border-black/5" style={{ backgroundColor: color }} />
+                            <span key={color} className="h-3 w-3 rounded-full border border-black/10 shadow-sm" style={{ backgroundColor: color }} />
                           ))}
                         </span>
-                      </Button>
+                        <span className="text-[11px] font-medium opacity-80">{decorTheme.themePreset === theme.id ? "현재 적용됨" : "눌러서 적용"}</span>
+                      </button>
                     ))}
                   </div>
                   <div className="text-xs text-slate-500">
-                    {decor.themePreset === "custom" ? "커스텀 모드에서는 업로드 배경과 URL 배경을 그대로 쓸 수 있어." : "현재는 파스텔 테마 모드라서 업로드 배경 대신 테마 색이 우선 적용돼."}
+                    {decorTheme.themePreset === "custom" ? "커스텀 모드에서는 업로드 배경과 URL 배경을 그대로 쓸 수 있어." : "현재는 파스텔 테마 모드라서 업로드 배경 대신 테마 색이 우선 적용돼."}
                   </div>
                 </div>
 
