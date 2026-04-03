@@ -19,6 +19,7 @@ const weekDays = ["일", "월", "화", "수", "목", "금", "토"];
 const SLEEP_COLOR = "#94a3b8";
 const SCHOOL_COLOR = "#60a5fa";
 const PLAN_SWATCHES = ["#ef4444", "#f59e0b", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899"];
+const APP_VERSION = "v1.0.0";
 const STORAGE_KEY = "weekly_planner_fixed_v6";
 const FALLBACK_KR_HOLIDAYS: Record<string, string> = {
   "01-01": "신정",
@@ -2375,6 +2376,10 @@ export default function WeeklyPlannerApp() {
                 <div className="flex gap-2 pt-2">
                   <motion.div whileTap={{ scale: 0.95 }} className="flex-1"><Button className="w-full" onClick={() => press(resetDecorSettings)}>기본값으로</Button></motion.div>
                   <motion.div whileTap={{ scale: 0.95 }} className="flex-1"><Button variant="outline" className="w-full" onClick={() => press(() => setShowSettings(false))}>닫기</Button></motion.div>
+                </div>
+
+                <div className="pt-1 text-center text-[11px] tracking-[0.18em] text-slate-400">
+                  VERSION {APP_VERSION}
                 </div>
               </div>
             </motion.div>
