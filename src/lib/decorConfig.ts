@@ -10,12 +10,23 @@ export type DecorThemeState = {
   panelOpacity: number;
 };
 
+export type BackgroundAssetMeta = {
+  assetId: string;
+  checksum: string;
+  mimeType: string;
+  size: number;
+  updatedAt: number;
+  cloudPath: string;
+  sourceDeviceId: string;
+};
+
 export type DecorMediaState = {
   mediaUrl: string;
   cloudMediaPath: string;
   uploadedMediaUrl: string;
   uploadedMediaType: "image" | "video" | "";
   mediaFit: MediaFitMode;
+  backgroundMeta: BackgroundAssetMeta | null;
 };
 
 export type DecorState = DecorThemeState & DecorMediaState;
@@ -35,6 +46,7 @@ export const DEFAULT_DECOR_MEDIA: DecorMediaState = {
   uploadedMediaUrl: "",
   uploadedMediaType: "",
   mediaFit: "auto",
+  backgroundMeta: null,
 };
 
 export const DEFAULT_DECOR: DecorState = {

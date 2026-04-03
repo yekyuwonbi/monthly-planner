@@ -8,9 +8,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingsRangeField } from "@/components/planner/SettingsRangeField";
-import { removePlannerBackground, uploadPlannerBackground } from "@/lib/cloudMedia";
+import { getPlannerBackgroundPublicUrl, removePlannerBackground, uploadPlannerBackground } from "@/lib/cloudMedia";
 import { fetchRemotePlannerState, saveRemotePlannerState } from "@/lib/cloudPlanner";
-import { DEFAULT_DECOR_MEDIA, DEFAULT_DECOR_THEME, type DecorMediaState, type DecorState, type DecorThemeState, type MediaFitMode, splitDecorState } from "@/lib/decorConfig";
+import { DEFAULT_DECOR_MEDIA, DEFAULT_DECOR_THEME, type BackgroundAssetMeta, type DecorMediaState, type DecorState, type DecorThemeState, type MediaFitMode, splitDecorState } from "@/lib/decorConfig";
 import { DAILY_MESSAGES } from "@/lib/dailyMessages";
 import { buildPanelTheme } from "@/lib/plannerTheme";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
@@ -19,8 +19,9 @@ const weekDays = ["일", "월", "화", "수", "목", "금", "토"];
 const SLEEP_COLOR = "#94a3b8";
 const SCHOOL_COLOR = "#60a5fa";
 const PLAN_SWATCHES = ["#ef4444", "#f59e0b", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899"];
-const APP_VERSION = "v1.0.0";
+const APP_VERSION = "v1.1.0";
 const STORAGE_KEY = "weekly_planner_fixed_v6";
+const DEVICE_ID_STORAGE_KEY = "monthly_planner_device_id_v1";
 const FALLBACK_KR_HOLIDAYS: Record<string, string> = {
   "01-01": "신정",
   "03-01": "삼일절",
@@ -100,6 +101,11 @@ type SavedState = {
   meta?: PlannerMeta;
 };
 type Segment = { start: number; end: number; color: string; label: string };
+type LocalBackgroundRecord = {
+  blob: Blob;
+  uploadedMediaType: "image" | "video";
+  backgroundMeta: BackgroundAssetMeta | null;
+};
 
 const DEFAULT_SLEEP: SleepState = { enabled: true, start: "00:00", end: "07:00" };
 const DEFAULT_SCHOOL: SchoolState = {
@@ -312,11 +318,11 @@ function openPlannerDb() {
   });
 }
 
-function saveUploadedMediaToDb(blob: Blob, uploadedMediaType: "image" | "video") {
+function saveUploadedMediaToDb(blob: Blob, uploadedMediaType: "image" | "video", backgroundMeta: BackgroundAssetMeta | null) {
   return openPlannerDb().then((db) => new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(PLANNER_MEDIA_STORE, "readwrite");
     const store = transaction.objectStore(PLANNER_MEDIA_STORE);
-    store.put({ key: PLANNER_MEDIA_KEY, blob, uploadedMediaType });
+    store.put({ key: PLANNER_MEDIA_KEY, blob, uploadedMediaType, backgroundMeta });
     transaction.oncomplete = () => {
       db.close();
       resolve();
@@ -329,7 +335,7 @@ function saveUploadedMediaToDb(blob: Blob, uploadedMediaType: "image" | "video")
 }
 
 function loadUploadedMediaFromDb() {
-  return openPlannerDb().then((db) => new Promise<{ blob: Blob; uploadedMediaType: "image" | "video" } | null>((resolve, reject) => {
+  return openPlannerDb().then((db) => new Promise<LocalBackgroundRecord | null>((resolve, reject) => {
     const transaction = db.transaction(PLANNER_MEDIA_STORE, "readonly");
     const store = transaction.objectStore(PLANNER_MEDIA_STORE);
     const request = store.get(PLANNER_MEDIA_KEY);
@@ -339,7 +345,11 @@ function loadUploadedMediaFromDb() {
         resolve(null);
         return;
       }
-      resolve({ blob: request.result.blob as Blob, uploadedMediaType: request.result.uploadedMediaType as "image" | "video" });
+      resolve({
+        blob: request.result.blob as Blob,
+        uploadedMediaType: request.result.uploadedMediaType as "image" | "video",
+        backgroundMeta: (request.result.backgroundMeta as BackgroundAssetMeta | null | undefined) || null,
+      });
     };
     request.onerror = () => {
       db.close();
@@ -498,6 +508,45 @@ function getImageExtensionFromMime(mimeType: string) {
   return "png";
 }
 
+function createHexDigest(buffer: ArrayBuffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function computeBlobChecksum(blob: Blob) {
+  const buffer = await blob.arrayBuffer();
+  const digest = await window.crypto.subtle.digest("SHA-256", buffer);
+  return createHexDigest(digest);
+}
+
+function getPlannerDeviceId() {
+  if (typeof window === "undefined") return "server";
+  const saved = window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+  if (saved) return saved;
+  const generated = window.crypto.randomUUID();
+  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, generated);
+  return generated;
+}
+
+function buildBackgroundAssetMeta(
+  file: Blob,
+  checksum: string,
+  uploadedMediaType: "image" | "video",
+  sourceDeviceId: string,
+  cloudPath = "",
+): BackgroundAssetMeta {
+  return {
+    assetId: checksum.slice(0, 24),
+    checksum,
+    mimeType: file.type || (uploadedMediaType === "video" ? "video/mp4" : "image/png"),
+    size: file.size,
+    updatedAt: Date.now(),
+    cloudPath,
+    sourceDeviceId,
+  };
+}
+
 function getAutoMediaFit(viewportAspect: number | null, mediaAspect: number | null): Exclude<MediaFitMode, "auto"> {
   if (!viewportAspect || !mediaAspect) return "cover";
   return Math.abs(viewportAspect - mediaAspect) > 0.42 ? "contain" : "cover";
@@ -618,6 +667,9 @@ export default function WeeklyPlannerApp() {
   const [needsPasswordUpdate, setNeedsPasswordUpdate] = useState(false);
   const [cloudSyncing, setCloudSyncing] = useState(false);
   const [cloudReady, setCloudReady] = useState(!isSupabaseConfigured);
+  const [authResolved, setAuthResolved] = useState(!isSupabaseConfigured);
+  const [localBootReady, setLocalBootReady] = useState(false);
+  const [initialCloudSyncDone, setInitialCloudSyncDone] = useState(!isSupabaseConfigured);
   const [decorTheme, setDecorTheme] = useState<DecorThemeState>(DEFAULT_DECOR_THEME);
   const [decorMedia, setDecorMedia] = useState<DecorMediaState>(DEFAULT_DECOR_MEDIA);
   const [holidays, setHolidays] = useState<Record<string, string>>({});
@@ -708,6 +760,38 @@ export default function WeeklyPlannerApp() {
     await saveRemotePlannerState(supabase, sessionUserId, snapshot, updatedAt);
     setAuthMessage(message);
   }, [sessionUserId]);
+  const syncBackgroundAsset = useCallback(async (
+    client: NonNullable<typeof supabase>,
+    userId: string,
+    file: File,
+    uploadedMediaType: "image" | "video",
+    nextMeta: BackgroundAssetMeta,
+    currentMedia: DecorMediaState,
+  ) => {
+    const currentMeta = currentMedia.backgroundMeta;
+    if (currentMeta?.checksum === nextMeta.checksum && currentMeta.cloudPath) {
+      const publicUrl = currentMedia.mediaUrl || getPlannerBackgroundPublicUrl(client, currentMeta.cloudPath);
+      return {
+        path: currentMeta.cloudPath,
+        publicUrl,
+        backgroundMeta: { ...currentMeta, ...nextMeta, cloudPath: currentMeta.cloudPath, updatedAt: currentMeta.updatedAt || nextMeta.updatedAt },
+      };
+    }
+
+    const { path, publicUrl } = await uploadPlannerBackground(
+      client,
+      userId,
+      file,
+      uploadedMediaType,
+      currentMeta?.cloudPath || currentMedia.cloudMediaPath || undefined,
+      nextMeta.assetId,
+    );
+    return {
+      path,
+      publicUrl,
+      backgroundMeta: { ...nextMeta, cloudPath: path },
+    };
+  }, []);
 
   const applySavedState = useCallback((saved: SavedState | null) => {
     if (!saved) return;
@@ -743,12 +827,18 @@ export default function WeeklyPlannerApp() {
 
   useEffect(() => {
     const saved = loadSavedPlanner();
-    if (!saved) return;
-    applySavedState(saved);
+    if (saved) {
+      applySavedState(saved);
+    }
+    setLocalBootReady(true);
   }, [applySavedState]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
+    if (!localBootReady || !authResolved || (sessionUserId && !initialCloudSyncDone)) {
+      if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current);
+      return undefined;
+    }
     if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current);
     autosaveTimeoutRef.current = setTimeout(() => {
       try {
@@ -767,11 +857,12 @@ export default function WeeklyPlannerApp() {
     return () => {
       if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current);
     };
-  }, [buildSavedState, triggerSavePulse]);
+  }, [authResolved, buildSavedState, initialCloudSyncDone, localBootReady, sessionUserId, triggerSavePulse]);
 
   useEffect(() => {
     if (!supabase) {
       setAuthMessage("지금은 이 기기 저장만 쓰고 있어. Supabase를 연결하면 여러 기기에서도 이어서 쓸 수 있어.");
+      setAuthResolved(true);
       return undefined;
     }
 
@@ -780,9 +871,11 @@ export default function WeeklyPlannerApp() {
       if (!active) return;
       if (error) {
         setAuthError(error.message);
+        setAuthResolved(true);
         return;
       }
       setSessionUser(data.session?.user ?? null);
+      setAuthResolved(true);
     });
 
     const { data } = supabase.auth.onAuthStateChange((event, session) => {
@@ -793,6 +886,7 @@ export default function WeeklyPlannerApp() {
         setAuthMessage("새 비밀번호를 입력하면 바로 변경돼.");
       }
       setSessionUser(session?.user ?? null);
+      setAuthResolved(true);
     });
 
     return () => {
@@ -802,10 +896,11 @@ export default function WeeklyPlannerApp() {
   }, []);
 
   useEffect(() => {
-    if (!supabase) return undefined;
+    if (!supabase || !authResolved || !localBootReady) return undefined;
     if (!sessionUserId) {
       setCloudReady(true);
       setCloudSyncing(false);
+      setInitialCloudSyncDone(true);
       setAuthMessage("");
       return undefined;
     }
@@ -816,6 +911,7 @@ export default function WeeklyPlannerApp() {
     const syncStartedAtVersion = plannerStateVersionRef.current;
 
     async function syncPlannerFromCloud() {
+      setInitialCloudSyncDone(false);
       setCloudSyncing(true);
       setCloudReady(false);
       setAuthError("");
@@ -849,6 +945,7 @@ export default function WeeklyPlannerApp() {
         if (!cancelled) {
           setCloudSyncing(false);
           setCloudReady(true);
+          setInitialCloudSyncDone(true);
         }
       }
     }
@@ -858,7 +955,7 @@ export default function WeeklyPlannerApp() {
     return () => {
       cancelled = true;
     };
-  }, [applySavedState, sessionUserId]);
+  }, [applySavedState, authResolved, localBootReady, sessionUserId]);
 
   useEffect(() => {
     if (!supabase || !sessionUserId || !cloudReady) return undefined;
@@ -881,8 +978,6 @@ export default function WeeklyPlannerApp() {
 
   useEffect(() => {
     if (!supabase || !sessionUser || !cloudReady || decorTheme.themePreset !== "custom") return undefined;
-    if (decorMedia.cloudMediaPath || decorMedia.mediaUrl) return undefined;
-
     let cancelled = false;
     const client = supabase;
     const user = sessionUser;
@@ -890,15 +985,36 @@ export default function WeeklyPlannerApp() {
     loadUploadedMediaFromDb()
       .then(async (result) => {
         if (!result || cancelled) return;
+        const checksum = result.backgroundMeta?.checksum || await computeBlobChecksum(result.blob);
+        if (cancelled) return;
+        const localMeta = result.backgroundMeta || buildBackgroundAssetMeta(result.blob, checksum, result.uploadedMediaType, getPlannerDeviceId());
+        const currentMedia = (latestPlannerStateRef.current?.decorMedia as DecorMediaState | undefined) || decorMedia;
+        const currentMeta = currentMedia.backgroundMeta;
+
+        if (currentMeta?.checksum === localMeta.checksum && currentMeta.cloudPath) {
+          applyUploadedMediaPreview(result.blob, result.uploadedMediaType);
+          const publicUrl = currentMedia.mediaUrl || getPlannerBackgroundPublicUrl(client, currentMeta.cloudPath);
+          const stableMeta = { ...currentMeta, ...localMeta, cloudPath: currentMeta.cloudPath };
+          setDecorMedia((prev) => ({ ...prev, mediaUrl: publicUrl, cloudMediaPath: stableMeta.cloudPath, backgroundMeta: stableMeta }));
+          await saveUploadedMediaToDb(result.blob, result.uploadedMediaType, stableMeta);
+          return;
+        }
+
+        if (currentMeta?.updatedAt && currentMeta.updatedAt >= localMeta.updatedAt && (currentMedia.mediaUrl || currentMeta.cloudPath)) {
+          return;
+        }
+
+        applyUploadedMediaPreview(result.blob, result.uploadedMediaType);
         const extension = result.uploadedMediaType === "video" ? "mp4" : getImageExtensionFromMime(result.blob.type || "");
         const file = new File([result.blob], `planner-background.${extension}`, {
           type: result.blob.type || (result.uploadedMediaType === "video" ? "video/mp4" : "image/png"),
         });
-        const { path, publicUrl } = await uploadPlannerBackground(client, user.id, file, result.uploadedMediaType);
+        const synced = await syncBackgroundAsset(client, user.id, file, result.uploadedMediaType, localMeta, currentMedia);
         if (cancelled) return;
-        setDecorMedia((prev) => ({ ...prev, mediaUrl: publicUrl, cloudMediaPath: path }));
+        setDecorMedia((prev) => ({ ...prev, mediaUrl: synced.publicUrl, cloudMediaPath: synced.path, backgroundMeta: synced.backgroundMeta }));
+        await saveUploadedMediaToDb(result.blob, result.uploadedMediaType, synced.backgroundMeta);
         await persistSnapshotToCloud(
-          buildCloudSavedState({ mediaUrl: publicUrl, cloudMediaPath: path }),
+          buildCloudSavedState({ mediaUrl: synced.publicUrl, cloudMediaPath: synced.path, backgroundMeta: synced.backgroundMeta }),
           "이 기기의 배경도 계정에 연결했어.",
         );
       })
@@ -907,7 +1023,14 @@ export default function WeeklyPlannerApp() {
     return () => {
       cancelled = true;
     };
-  }, [buildCloudSavedState, cloudReady, decorMedia.cloudMediaPath, decorMedia.mediaUrl, decorTheme.themePreset, persistSnapshotToCloud, sessionUser]);
+  }, [buildCloudSavedState, cloudReady, decorMedia, decorTheme.themePreset, persistSnapshotToCloud, sessionUser, syncBackgroundAsset]);
+
+  useEffect(() => {
+    if (!supabase || !decorMedia.cloudMediaPath || decorMedia.mediaUrl) return;
+    const publicUrl = getPlannerBackgroundPublicUrl(supabase, decorMedia.cloudMediaPath);
+    if (!publicUrl) return;
+    setDecorMedia((prev) => ({ ...prev, mediaUrl: publicUrl }));
+  }, [decorMedia.cloudMediaPath, decorMedia.mediaUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1130,27 +1253,27 @@ export default function WeeklyPlannerApp() {
     if (!file) return;
     try {
       const uploadedMediaType = file.type.startsWith("video/") ? "video" : "image";
-      await saveUploadedMediaToDb(file, uploadedMediaType);
+      const checksum = await computeBlobChecksum(file);
+      const nextMeta = buildBackgroundAssetMeta(file, checksum, uploadedMediaType, getPlannerDeviceId());
+      await saveUploadedMediaToDb(file, uploadedMediaType, nextMeta);
       applyUploadedMediaPreview(file, uploadedMediaType);
       if (supabase && sessionUser) {
-        const { path, publicUrl } = await uploadPlannerBackground(
-          supabase,
-          sessionUser.id,
-          file,
-          uploadedMediaType,
-          decorMedia.cloudMediaPath || undefined,
-        );
+        const currentMedia = (latestPlannerStateRef.current?.decorMedia as DecorMediaState | undefined) || decorMedia;
+        const synced = await syncBackgroundAsset(supabase, sessionUser.id, file, uploadedMediaType, nextMeta, currentMedia);
         setDecorMedia((prev) => ({
           ...prev,
-          mediaUrl: publicUrl,
-          cloudMediaPath: path,
+          mediaUrl: synced.publicUrl,
+          cloudMediaPath: synced.path,
+          backgroundMeta: synced.backgroundMeta,
         }));
+        await saveUploadedMediaToDb(file, uploadedMediaType, synced.backgroundMeta);
         await persistSnapshotToCloud(
-          buildCloudSavedState({ mediaUrl: publicUrl, cloudMediaPath: path }),
+          buildCloudSavedState({ mediaUrl: synced.publicUrl, cloudMediaPath: synced.path, backgroundMeta: synced.backgroundMeta }),
           "배경이 계정에도 저장됐어",
         );
         pendingSaveMessageRef.current = "배경이 계정에도 저장됐어";
       } else {
+        setDecorMedia((prev) => ({ ...prev, backgroundMeta: nextMeta }));
         pendingSaveMessageRef.current = "배경이 저장됐어";
       }
     } catch {
@@ -1166,7 +1289,7 @@ export default function WeeklyPlannerApp() {
     }
     clearUploadedMediaFromDb().catch(() => undefined);
     applyUploadedMediaPreview(null, "");
-    setDecorMedia((prev) => ({ ...prev, mediaUrl: "", cloudMediaPath: "", uploadedMediaUrl: "", uploadedMediaType: "" }));
+    setDecorMedia((prev) => ({ ...prev, mediaUrl: "", cloudMediaPath: "", uploadedMediaUrl: "", uploadedMediaType: "", backgroundMeta: null }));
   };
 
   const resetDecorSettings = () => {
