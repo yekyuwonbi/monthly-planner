@@ -1,16 +1,21 @@
 {
-  "name": "weekly-planner-run",
+  "name": "monthly-planner",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "local": "node serve-dist.cjs"
+    "local": "node serve-dist.cjs",
+    "cap:sync": "npm run build && npx cap sync android",
+    "android:open": "npx cap open android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.3.0",
+    "@capacitor/cli": "^8.3.0",
+    "@capacitor/core": "^8.3.0",
     "@supabase/supabase-js": "^2.101.1",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.7.0",

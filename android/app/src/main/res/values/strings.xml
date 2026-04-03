@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Monthly Planner</string>
+    <string name="title_activity_main">Monthly Planner</string>
+    <string name="package_name">com.yekyuwonbi.monthlyplanner</string>
+    <string name="custom_url_scheme">com.yekyuwonbi.monthlyplanner</string>
+</resources>
