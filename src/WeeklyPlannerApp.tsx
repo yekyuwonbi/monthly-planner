@@ -488,6 +488,15 @@ function getMediaType(url: string) {
   return "image";
 }
 
+function getImageExtensionFromMime(mimeType: string) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("gif")) return "gif";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("avif")) return "avif";
+  return "png";
+}
+
 function getAutoMediaFit(viewportAspect: number | null, mediaAspect: number | null): Exclude<MediaFitMode, "auto"> {
   if (!viewportAspect || !mediaAspect) return "cover";
   return Math.abs(viewportAspect - mediaAspect) > 0.42 ? "contain" : "cover";
@@ -673,6 +682,31 @@ export default function WeeklyPlannerApp() {
     };
   }, [decorMedia, decorTheme, interaction, interval, planSync, plans, profile, school, sleep, todos]);
   const getCurrentSavedState = useEffectEvent(() => buildSavedState());
+  const buildCloudSavedState = useCallback((mediaPatch?: Partial<DecorMediaState>, updatedAt = Date.now()) => {
+    const snapshot = buildSavedState(updatedAt);
+    if (!mediaPatch) return snapshot;
+    const decorThemeForStorage: DecorThemeState = { ...DEFAULT_DECOR_THEME, ...(snapshot.decorTheme || {}) };
+    const decorMediaForStorage: DecorMediaState = {
+      ...DEFAULT_DECOR_MEDIA,
+      ...(snapshot.decorMedia || {}),
+      ...mediaPatch,
+      uploadedMediaUrl: "",
+      uploadedMediaType: "",
+    };
+    return {
+      ...snapshot,
+      decorTheme: decorThemeForStorage,
+      decorMedia: decorMediaForStorage,
+      decor: { ...decorThemeForStorage, ...decorMediaForStorage },
+      meta: { updatedAt },
+    };
+  }, [buildSavedState]);
+  const persistSnapshotToCloud = useCallback(async (snapshot: SavedState, message: string) => {
+    if (!supabase || !sessionUserId) return;
+    const updatedAt = getSavedStateUpdatedAt(snapshot) || Date.now();
+    await saveRemotePlannerState(supabase, sessionUserId, snapshot, updatedAt);
+    setAuthMessage(message);
+  }, [sessionUserId]);
 
   const applySavedState = useCallback((saved: SavedState | null) => {
     if (!saved) return;
@@ -855,21 +889,24 @@ export default function WeeklyPlannerApp() {
     loadUploadedMediaFromDb()
       .then(async (result) => {
         if (!result || cancelled) return;
-        const extension = result.uploadedMediaType === "video" ? "mp4" : "png";
+        const extension = result.uploadedMediaType === "video" ? "mp4" : getImageExtensionFromMime(result.blob.type || "");
         const file = new File([result.blob], `planner-background.${extension}`, {
           type: result.blob.type || (result.uploadedMediaType === "video" ? "video/mp4" : "image/png"),
         });
         const { path, publicUrl } = await uploadPlannerBackground(client, user.id, file, result.uploadedMediaType);
         if (cancelled) return;
         setDecorMedia((prev) => ({ ...prev, mediaUrl: publicUrl, cloudMediaPath: path }));
-        setAuthMessage("이 기기의 배경도 계정에 연결했어.");
+        await persistSnapshotToCloud(
+          buildCloudSavedState({ mediaUrl: publicUrl, cloudMediaPath: path }),
+          "이 기기의 배경도 계정에 연결했어.",
+        );
       })
       .catch(() => undefined);
 
     return () => {
       cancelled = true;
     };
-  }, [cloudReady, decorMedia.cloudMediaPath, decorMedia.mediaUrl, decorTheme.themePreset, sessionUser]);
+  }, [buildCloudSavedState, cloudReady, decorMedia.cloudMediaPath, decorMedia.mediaUrl, decorTheme.themePreset, persistSnapshotToCloud, sessionUser]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1107,6 +1144,10 @@ export default function WeeklyPlannerApp() {
           mediaUrl: publicUrl,
           cloudMediaPath: path,
         }));
+        await persistSnapshotToCloud(
+          buildCloudSavedState({ mediaUrl: publicUrl, cloudMediaPath: path }),
+          "배경이 계정에도 저장됐어",
+        );
         pendingSaveMessageRef.current = "배경이 계정에도 저장됐어";
       } else {
         pendingSaveMessageRef.current = "배경이 저장됐어";
